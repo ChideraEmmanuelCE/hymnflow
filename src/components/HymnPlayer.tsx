@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { Hymn } from "@/data/hymns";
 import ChordDiagram from "./ChordDiagram";
 import DemoCharacter from "./DemoCharacter";
+import { HymnAudio, type InstrumentName } from "@/lib/hymnAudio";
 
 type Props = {
   hymn: Hymn;
@@ -14,10 +15,39 @@ export default function HymnPlayer({ hymn }: Props) {
   const [currentBeat, setCurrentBeat] = useState(0);
   const [activeInstrument, setActiveInstrument] = useState(0);
   const [showExplain, setShowExplain] = useState(true);
+  const [volume, setVolume] = useState(75);
+  const [metronome, setMetronome] = useState(false);
+  const [audioError, setAudioError] = useState("");
+  const engineRef = useRef<HymnAudio | null>(null);
+  const lastPlayedRef = useRef(-1);
+  const instrumentRef = useRef<InstrumentName>("Guitar");
+  const metronomeRef = useRef(false);
+  const beatsPerBar = Math.max(1, parseInt(hymn.timeSignature, 10) || 4);
+  useEffect(() => () => engineRef.current?.dispose(), []);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const startTimeRef = useRef<number>(0);
 
   const msPerBeat = (60 / hymn.bpm) * 1000;
+  const chordForBeat = (beat: number) => {
+    let chord = hymn.progression[0]?.chord || "G";
+    for (const event of hymn.progression) {
+      if (event.beat <= beat) chord = event.chord;
+      else break;
+    }
+    return chord;
+  };
+  const soundBeat = (beat: number) => {
+    engineRef.current?.beat(beat, chordForBeat(beat), instrumentRef.current, beatsPerBar, metronomeRef.current);
+    lastPlayedRef.current = beat;
+  };
+  const chooseInstrument = (idx: number) => {
+    instrumentRef.current = hymn.instruments[idx]?.name === "Piano" ? "Piano" : "Guitar";
+    setActiveInstrument(idx);
+    if (isPlaying && engineRef.current) {
+      engineRef.current.stop();
+      soundBeat(currentBeat);
+    }
+  };
 
   const getCurrentChord = useCallback(() => {
     let chord = hymn.progression[0]?.chord || "G";
@@ -46,10 +76,13 @@ export default function HymnPlayer({ hymn }: Props) {
       const elapsed = Date.now() - startTimeRef.current;
       const beat = Math.floor(elapsed / msPerBeat);
       if (beat >= hymn.totalBeats) {
+        engineRef.current?.stop();
+        lastPlayedRef.current = -1;
         setIsPlaying(false);
         setCurrentBeat(0);
         return;
       }
+      if (beat !== lastPlayedRef.current) soundBeat(beat);
       setCurrentBeat(beat);
     }, 50);
     return () => {
@@ -57,8 +90,31 @@ export default function HymnPlayer({ hymn }: Props) {
     };
   }, [isPlaying, msPerBeat, hymn.totalBeats]);
 
-  const togglePlay = () => setIsPlaying((p) => !p);
+  const togglePlay = async () => {
+    if (isPlaying) {
+      engineRef.current?.stop();
+      lastPlayedRef.current = -1;
+      setIsPlaying(false);
+      return;
+    }
+    setAudioError("");
+    const engine = engineRef.current ?? new HymnAudio();
+    engineRef.current = engine;
+    try {
+      // Web Audio is unlocked directly by the user's Play tap.
+      await engine.unlock();
+      engine.setVolume(volume);
+      const beat = currentBeat >= hymn.totalBeats ? 0 : currentBeat;
+      if (beat !== currentBeat) setCurrentBeat(beat);
+      soundBeat(beat);
+      setIsPlaying(true);
+    } catch (error) {
+      setAudioError(error instanceof Error ? error.message : "Unable to start audio.");
+    }
+  };
   const reset = () => {
+    engineRef.current?.stop();
+    lastPlayedRef.current = -1;
     setIsPlaying(false);
     setCurrentBeat(0);
   };
@@ -102,8 +158,25 @@ export default function HymnPlayer({ hymn }: Props) {
                 </button>
               </div>
               <div className="font-mono text-sm text-slate-400">Beat {currentBeat} / {hymn.totalBeats}</div>
-              <div className="text-xs text-slate-500">Visual metronome</div>
+              <div className="text-xs text-amber-300/80">♪ Live audio</div>
             </div>
+            <div className="mt-4 pt-3 border-t border-slate-700/50 flex flex-wrap items-center justify-between gap-3">
+              <label className="flex items-center gap-2 text-xs text-slate-200">
+                <span>🔊 Volume</span>
+                <input aria-label="Accompaniment volume" type="range" min={0} max={100} step={5} value={volume}
+                  onChange={(e) => { const v = Number(e.target.value); setVolume(v); engineRef.current?.setVolume(v); }}
+                  className="w-24 sm:w-32 accent-amber-400" />
+                <span className="tabular-nums text-amber-200">{volume}%</span>
+              </label>
+              <label className="flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
+                <input type="checkbox" checked={metronome}
+                  onChange={(e) => { setMetronome(e.target.checked); metronomeRef.current = e.target.checked; }}
+                  className="accent-amber-400" />
+                Metronome
+              </label>
+            </div>
+            {audioError && <p role="alert" className="mt-3 text-red-300 text-sm">{audioError}</p>}
+            <p className="mt-2 text-xs text-slate-500">Tap Play for audible instrumental accompaniment (not a vocal recording).</p>
           </div>
 
           <div className="rounded-2xl bg-slate-900/50 border border-slate-800 p-5 space-y-6">
@@ -132,7 +205,7 @@ export default function HymnPlayer({ hymn }: Props) {
         <div className="lg:col-span-5 space-y-5">
           <div className="flex gap-2 flex-wrap">
             {hymn.instruments.map((inst, idx) => (
-              <button key={inst.name} onClick={() => setActiveInstrument(idx)} className={`px-3 py-1.5 rounded-full text-sm font-medium transition ${activeInstrument === idx ? "bg-amber-500/20 text-amber-300 border border-amber-500/40" : "bg-slate-800 text-slate-400 border border-slate-700 hover:border-slate-500"}`}>
+              <button key={inst.name} onClick={() => chooseInstrument(idx)} className={`px-3 py-1.5 rounded-full text-sm font-medium transition ${activeInstrument === idx ? "bg-amber-500/20 text-amber-300 border border-amber-500/40" : "bg-slate-800 text-slate-400 border border-slate-700 hover:border-slate-500"}`}>
                 {inst.name}
               </button>
             ))}
